@@ -567,6 +567,8 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_a2a_private_allowlist_column"}, run: migrationAddA2APrivateAllowlistColumn},
 	{IDs: []string{"add_agent_destination_policy_columns"}, run: migrationAddAgentDestinationPolicyColumns},
 	{IDs: []string{"drop_agent_registration_options"}, run: migrationDropAgentRegistrationOptions},
+	{IDs: []string{"add_rss_feeds_table"}, run: migrationAddRSSFeedsTable},
+	{IDs: []string{"add_rss_feeds_icon_url_column"}, run: migrationAddRSSFeedsIconURLColumn},
 }
 
 // warpLogEmbeddingColumns are the semantic-search configuration columns added
@@ -1108,6 +1110,48 @@ func migrationAddNotificationsTable(ctx context.Context, db *gorm.DB, logger sch
 		},
 		Rollback: func(tx *gorm.DB) error {
 			return tx.WithContext(ctx).Migrator().DropTable(&tables.TableNotification{})
+		},
+	})
+}
+
+// migrationAddRSSFeedsTable creates rss_feeds and seeds the builtin catalog.
+// Builtin rows added to the catalog later are picked up by the boot-time
+// SeedBuiltinRSSFeeds call, not by a new migration.
+func migrationAddRSSFeedsTable(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "add_rss_feeds_table"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	return RunSingleMigration(ctx, nil, db, logger, &migrator.Migration{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			if err := tx.WithContext(ctx).AutoMigrate(&tables.TableRSSFeed{}); err != nil {
+				return err
+			}
+			return SeedBuiltinRSSFeeds(ctx, tx)
+		},
+		Rollback: func(tx *gorm.DB) error {
+			return tx.WithContext(ctx).Migrator().DropTable(&tables.TableRSSFeed{})
+		},
+	})
+}
+
+// migrationAddRSSFeedsIconURLColumn adds the custom-logo column to rss_feeds
+// tables created before it existed. Without it every feed update and the
+// boot-time builtin reseed fail, since both write icon_url.
+func migrationAddRSSFeedsIconURLColumn(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "add_rss_feeds_icon_url_column"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	return RunSingleMigration(ctx, nil, db, logger, &migrator.Migration{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			return addColumnIfNotExists(tx.WithContext(ctx), logger, &tables.TableRSSFeed{}, "IconURL")
+		},
+		Rollback: func(tx *gorm.DB) error {
+			if tx.Migrator().HasColumn(&tables.TableRSSFeed{}, "IconURL") {
+				return tx.WithContext(ctx).Migrator().DropColumn(&tables.TableRSSFeed{}, "IconURL")
+			}
+			return nil
 		},
 	})
 }
