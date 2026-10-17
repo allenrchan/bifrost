@@ -1877,6 +1877,7 @@ func TestChatStreamRawCaptureIsBoundedByBytes(t *testing.T) {
 	}
 }
 
+// TestChatStreamUsagePresence distinguishes absent provider usage from measured zero usage.
 func TestChatStreamUsagePresence(t *testing.T) {
 	for _, measured := range []bool{false, true} {
 		name := "missing"
@@ -1984,6 +1985,7 @@ func TestChatStreamPartialTokenMeasurements(t *testing.T) {
 	}
 }
 
+// BenchmarkChatStreamUsagePresence measures receipt handling on a local streamed response.
 func BenchmarkChatStreamUsagePresence(b *testing.B) {
 	stop := "stop"
 	body := chatChunk("hello", nil) + chatChunk("", &stop) +
