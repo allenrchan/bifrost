@@ -150,6 +150,26 @@ This profile does not require the backing services or keys used by live-provider
 tests. Go-level coverage also checks that the retained cancellation usage handle
 stays absent until the provider reports usage. An explicit zero remains observed.
 
+### Partial token measurements
+
+The same local profile provides `upstream-usage-partial`: input is 20 while
+output and total are not reported. Folder 230 covers native and OpenAI SDK Chat
+and Responses endpoints, both buffered and streamed. No live model is called.
+With the fixture/profile above running, execute:
+
+```bash
+make run-provider-harness-test PROVIDER=openai FEATURE="partial token measurements" BASE_URL=http://localhost:8790 ENV_FILE=tmp/stream-usage.env.json COMPAT=off DB_VERIFY=0 SKIP_STREAM_CANCEL=1 HARNESS_MAX_REQUESTS=8
+```
+
+Decoded numeric presence survives schema round trips, conversion, copies and
+cumulative stream receipts. A total can be derived after both components are
+observed; one component alone cannot establish the other or their sum. JSON
+null is unmeasured, and reported zero remains measured. Programmatically
+constructed usage declares its numeric counters. No raw payload is retained.
+The SDK counter-presence state is one byte per usage object; no manager/cache
+entry or stream-sized buffer is added. Wire cost overrides keep their existing
+numeric representation without mutating the shared usage.
+
 ## Provider 5xx failover and 429 retry-hint propagation
 
 These deterministic cases use a local HTTP fixture and an isolated gateway. They make no live

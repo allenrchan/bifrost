@@ -54,6 +54,26 @@ test("a model that is not a string is an unknown model and the fixture keeps ser
   assert.equal(ok.status, 200, "a valid request after the malformed ones");
 });
 
+test("partial token receipts report input without output or total on both protocols", async (t) => {
+  const post = await startFixture(t);
+  for (const responses of [false, true]) {
+    for (const stream of [false, true]) {
+      const path = responses ? "/v1/responses" : "/v1/chat/completions";
+      const body = responses ? { model: "upstream-usage-partial", input: "hi", stream }
+        : { model: "upstream-usage-partial", messages: [{ role: "user", content: "hi" }], stream, stream_options: { include_usage: true } };
+      const response = await post(body, path);
+      assert.equal(response.status, 200);
+      const raw = await response.text();
+      const values = stream ? raw.split(/\r?\n\r?\n/).flatMap((frame) => {
+        const data = frame.split(/\r?\n/).find((line) => line.startsWith("data:"))?.slice(5).trim();
+        return data && data !== "[DONE]" ? [JSON.parse(data)] : [];
+      }) : [JSON.parse(raw)];
+      const usage = values.map((value) => value.response?.usage ?? value.usage).find(Boolean);
+      assert.deepEqual(usage, responses ? { input_tokens: 20 } : { prompt_tokens: 20 });
+    }
+  }
+});
+
 test("filtered Live create checks accounting events and unchanged command permissions", async (t) => {
   const post = await startFixture(t);
   const top = ["session.started", "session.updated", "session.closed", "session.usage.updated", "session.delegation.created", "session.input_transcript.delta", "session.output_transcript.delta", "error"];
