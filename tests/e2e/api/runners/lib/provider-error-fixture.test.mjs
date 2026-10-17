@@ -103,6 +103,35 @@ test("partial token receipts report input without output or total on both protoc
   }
 });
 
+test("Gemini embedding fixtures require the selected key and keep per-input witnesses", async (t) => {
+  const post = await startFixture(t);
+  const path = "/models/gemini-embedding-001:batchEmbedContents";
+  const body = (text) => ({ requests: [{ content: { parts: [{ text }] } }] });
+  const headers = { "x-goog-api-key": "test-key" };
+  for (const selected of [{}, { "x-goog-api-key": "wrong-key" }]) {
+    const refused = await post(body("fixture-empty-embedding-usage:isolated"), path, selected);
+    assert.equal(refused.status, 401);
+  }
+  const malformed = await post({}, path, headers);
+  assert.equal(malformed.status, 400);
+  const measured = await post(body("fixture-empty-embedding-usage:isolated"), path, headers);
+  assert.equal(measured.status, 200);
+  assert.deepEqual(await measured.json(), { embeddings: [], usageMetadata: { promptTokenCount: 12, totalTokenCount: 12 } });
+  const unmeasured = await post(body("fixture-unmeasured-empty-embedding:isolated"), path, headers);
+  assert.equal(unmeasured.status, 200);
+  assert.deepEqual(await unmeasured.json(), { embeddings: [] });
+  const valid = await post(body("fixture-valid-embedding:isolated"), path, headers);
+  assert.equal(valid.status, 200);
+  assert.deepEqual((await valid.json()).embeddings, [{ values: [0.1, 0.2] }]);
+  const witness = await fetch(new URL("/__hits", measured.url));
+  assert.equal(witness.status, 200);
+  assert.deepEqual((await witness.json()).data[0].hits, {
+    "embedding:fixture-empty-embedding-usage:isolated": 1,
+    "embedding:fixture-unmeasured-empty-embedding:isolated": 1,
+    "embedding:fixture-valid-embedding:isolated": 1,
+  });
+});
+
 test("filtered Live create checks accounting events and unchanged command permissions", async (t) => {
   const post = await startFixture(t);
   const top = ["session.started", "session.updated", "session.closed", "session.usage.updated", "session.delegation.created", "session.input_transcript.delta", "session.output_transcript.delta", "error"];
