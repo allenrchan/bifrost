@@ -1114,3 +1114,8 @@ Two are worth calling out:
   per-second model, so video-to-video under-bills. Run it to measure the gap.
 - **`expect_job_params`** (the Gemini cases) needs `--config-db-url`; without it those checks report
   as skipped rather than failing, so every other check still works against hosted Bifrost.
+
+Responses normalization preserves absent input/output usage detail objects. An
+explicit cache or reasoning zero remains present; defaults do not create those
+measurements when the provider omitted the detail object. The partial token
+fixture cases assert this on buffered and streaming routes.

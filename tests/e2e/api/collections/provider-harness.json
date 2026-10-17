@@ -262423,6 +262423,8 @@
                   "    pm.expect(usage, raw).to.have.property('prompt_tokens', 20);",
                   "    pm.expect(usage, raw).to.not.have.property('completion_tokens');",
                   "    pm.expect(usage, raw).to.not.have.property('total_tokens');",
+                  "    pm.expect(usage.input_tokens_details == null && usage.prompt_tokens_details == null, 'unreported input details').to.equal(true);",
+                  "    pm.expect(usage.output_tokens_details == null && usage.completion_tokens_details == null, 'unreported output details').to.equal(true);",
                   "  });",
                   "});"
                 ]
@@ -262491,6 +262493,8 @@
                   "    pm.expect(usage, raw).to.have.property('prompt_tokens', 20);",
                   "    pm.expect(usage, raw).to.not.have.property('completion_tokens');",
                   "    pm.expect(usage, raw).to.not.have.property('total_tokens');",
+                  "    pm.expect(usage.input_tokens_details == null && usage.prompt_tokens_details == null, 'unreported input details').to.equal(true);",
+                  "    pm.expect(usage.output_tokens_details == null && usage.completion_tokens_details == null, 'unreported output details').to.equal(true);",
                   "  });",
                   "});"
                 ]
@@ -262553,6 +262557,8 @@
                   "    pm.expect(usage, raw).to.have.property('input_tokens', 20);",
                   "    pm.expect(usage, raw).to.not.have.property('output_tokens');",
                   "    pm.expect(usage, raw).to.not.have.property('total_tokens');",
+                  "    pm.expect(usage.input_tokens_details == null && usage.prompt_tokens_details == null, 'unreported input details').to.equal(true);",
+                  "    pm.expect(usage.output_tokens_details == null && usage.completion_tokens_details == null, 'unreported output details').to.equal(true);",
                   "  });",
                   "});"
                 ]
@@ -262620,6 +262626,8 @@
                   "    pm.expect(usage, raw).to.have.property('input_tokens', 20);",
                   "    pm.expect(usage, raw).to.not.have.property('output_tokens');",
                   "    pm.expect(usage, raw).to.not.have.property('total_tokens');",
+                  "    pm.expect(usage.input_tokens_details == null && usage.prompt_tokens_details == null, 'unreported input details').to.equal(true);",
+                  "    pm.expect(usage.output_tokens_details == null && usage.completion_tokens_details == null, 'unreported output details').to.equal(true);",
                   "  });",
                   "});"
                 ]
@@ -262681,6 +262689,8 @@
                   "    pm.expect(usage, raw).to.have.property('prompt_tokens', 20);",
                   "    pm.expect(usage, raw).to.not.have.property('completion_tokens');",
                   "    pm.expect(usage, raw).to.not.have.property('total_tokens');",
+                  "    pm.expect(usage.input_tokens_details == null && usage.prompt_tokens_details == null, 'unreported input details').to.equal(true);",
+                  "    pm.expect(usage.output_tokens_details == null && usage.completion_tokens_details == null, 'unreported output details').to.equal(true);",
                   "  });",
                   "});"
                 ]
@@ -262750,6 +262760,8 @@
                   "    pm.expect(usage, raw).to.have.property('prompt_tokens', 20);",
                   "    pm.expect(usage, raw).to.not.have.property('completion_tokens');",
                   "    pm.expect(usage, raw).to.not.have.property('total_tokens');",
+                  "    pm.expect(usage.input_tokens_details == null && usage.prompt_tokens_details == null, 'unreported input details').to.equal(true);",
+                  "    pm.expect(usage.output_tokens_details == null && usage.completion_tokens_details == null, 'unreported output details').to.equal(true);",
                   "  });",
                   "});"
                 ]
@@ -262813,6 +262825,8 @@
                   "    pm.expect(usage, raw).to.have.property('input_tokens', 20);",
                   "    pm.expect(usage, raw).to.not.have.property('output_tokens');",
                   "    pm.expect(usage, raw).to.not.have.property('total_tokens');",
+                  "    pm.expect(usage.input_tokens_details == null && usage.prompt_tokens_details == null, 'unreported input details').to.equal(true);",
+                  "    pm.expect(usage.output_tokens_details == null && usage.completion_tokens_details == null, 'unreported output details').to.equal(true);",
                   "  });",
                   "});"
                 ]
@@ -262881,6 +262895,8 @@
                   "    pm.expect(usage, raw).to.have.property('input_tokens', 20);",
                   "    pm.expect(usage, raw).to.not.have.property('output_tokens');",
                   "    pm.expect(usage, raw).to.not.have.property('total_tokens');",
+                  "    pm.expect(usage.input_tokens_details == null && usage.prompt_tokens_details == null, 'unreported input details').to.equal(true);",
+                  "    pm.expect(usage.output_tokens_details == null && usage.completion_tokens_details == null, 'unreported output details').to.equal(true);",
                   "  });",
                   "});"
                 ]

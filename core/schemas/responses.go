@@ -491,17 +491,11 @@ func (resp *BifrostResponsesResponse) WithDefaults() *BifrostResponsesResponse {
 		}
 	}
 
-	// Usage - ensure token details exist
+	// Usage details are provider measurements; defaults cannot invent observed zeros.
 	result.Usage = resp.Usage
 	if result.Usage != nil {
 		result.Usage.Iterations = nil
 		result.Usage.Type = nil
-		if result.Usage.InputTokensDetails == nil {
-			result.Usage.InputTokensDetails = &ResponsesResponseInputTokens{CachedReadTokens: 0, CachedWriteTokens: 0}
-		}
-		if result.Usage.OutputTokensDetails == nil {
-			result.Usage.OutputTokensDetails = &ResponsesResponseOutputTokens{ReasoningTokens: 0}
-		}
 	}
 
 	return result
