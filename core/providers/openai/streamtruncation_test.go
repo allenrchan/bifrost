@@ -2,18 +2,22 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/valyala/fasthttp"
 )
 
 // An upstream that dies mid-SSE closes its connection on a chunk boundary, which
@@ -1871,4 +1875,157 @@ func TestChatStreamRawCaptureIsBoundedByBytes(t *testing.T) {
 	if capturedBytes > limit {
 		t.Errorf("captured raw response is %d bytes, above the %d byte ceiling; an upstream streaming non-forwarding frames can grow this without bound", capturedBytes, limit)
 	}
+}
+
+// TestChatStreamUsagePresence distinguishes absent provider usage from measured zero usage.
+func TestChatStreamUsagePresence(t *testing.T) {
+	for _, measured := range []bool{false, true} {
+		name := "missing"
+		if measured {
+			name = "explicit_zero"
+		}
+		t.Run(name, func(t *testing.T) {
+			stop := "stop"
+			body := chatChunk("hello", nil) + chatChunk("", &stop)
+			if measured {
+				body += "data: {\"id\":\"chatcmpl-repro\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"repro-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}\n\n"
+			}
+			server := completeSSEServer(t, body+"data: [DONE]\n\n")
+			defer server.Close()
+			ctx := newStreamTestContext()
+			stream, err := newStreamTestProvider(server.URL).ChatCompletionStream(ctx, passthroughPostHook, nil, testKey(), basicChatRequest())
+			if err != nil {
+				t.Fatalf("stream setup failed: %v", err)
+			}
+			chunks := collectChunks(t, stream)
+			if len(chunks) == 0 {
+				t.Fatal("expected completed stream chunks")
+			}
+			for _, chunk := range chunks {
+				if chunk.BifrostError != nil {
+					t.Fatalf("stream failed: %+v", chunk.BifrostError)
+				}
+			}
+			final := chunks[len(chunks)-1].BifrostChatResponse
+			if final == nil {
+				t.Fatal("expected final chat response")
+			}
+			if (final.Usage != nil) != measured {
+				t.Fatalf("usage presence = %v, want %v: %+v", final.Usage != nil, measured, final.Usage)
+			}
+			if measured && (final.Usage.PromptTokens != 0 || final.Usage.CompletionTokens != 0 || final.Usage.TotalTokens != 0) {
+				t.Fatalf("explicit zero changed: %+v", final.Usage)
+			}
+			retained, _ := ctx.Value(schemas.BifrostContextKeyStreamAccumulatedUsage).(*schemas.BifrostLLMUsage)
+			if (retained != nil) != measured {
+				t.Fatalf("retained usage presence = %v, want %v", retained != nil, measured)
+			}
+		})
+	}
+}
+
+func TestChatStreamPartialTokenMeasurements(t *testing.T) {
+	for _, mode := range []string{"chat", "responses", "chat_to_responses"} {
+		t.Run(mode, func(t *testing.T) {
+			stop := "stop"
+			body := chatChunk("hello", nil) + chatChunk("", &stop) +
+				"data: {\"id\":\"chatcmpl-repro\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"repro-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":20}}\n\ndata: [DONE]\n\n"
+			if mode == "responses" {
+				body = "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp-repro\",\"object\":\"response\",\"model\":\"repro-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":20}}}\n\n"
+			}
+			server := completeSSEServer(t, body)
+			defer server.Close()
+			config := &schemas.ProviderConfig{NetworkConfig: schemas.NetworkConfig{BaseURL: server.URL}}
+			if mode == "chat_to_responses" {
+				config.CustomProviderConfig = &schemas.CustomProviderConfig{AllowedRequests: &schemas.AllowedRequests{ChatCompletionStream: true, ResponsesStream: false}}
+			}
+			provider := NewOpenAIProvider(config, testNoopLogger{})
+			var stream chan *schemas.BifrostStreamChunk
+			var failure *schemas.BifrostError
+			if mode == "chat" {
+				stream, failure = provider.ChatCompletionStream(newStreamTestContext(), passthroughPostHook, nil, testKey(), basicChatRequest())
+			} else {
+				request := &schemas.BifrostResponsesRequest{Provider: schemas.OpenAI, Model: "repro-model", Input: []schemas.ResponsesMessage{{Type: schemas.Ptr(schemas.ResponsesMessageTypeMessage), Role: schemas.Ptr(schemas.ResponsesInputMessageRoleUser), Content: &schemas.ResponsesMessageContent{ContentStr: schemas.Ptr("hi")}}}}
+				stream, failure = provider.ResponsesStream(newStreamTestContext(), passthroughPostHook, nil, testKey(), request)
+			}
+			if failure != nil {
+				t.Fatalf("stream setup: %+v", failure)
+			}
+			var receipt any
+			for _, chunk := range collectChunks(t, stream) {
+				if chunk.BifrostError != nil {
+					t.Fatalf("stream failed: %+v", chunk.BifrostError)
+				}
+				if chunk.BifrostChatResponse != nil && chunk.BifrostChatResponse.Usage != nil {
+					receipt = chunk.BifrostChatResponse.Usage
+				}
+				if chunk.BifrostResponsesStreamResponse != nil && chunk.BifrostResponsesStreamResponse.Response != nil && chunk.BifrostResponsesStreamResponse.Response.Usage != nil {
+					receipt = chunk.BifrostResponsesStreamResponse.Response.Usage
+				}
+			}
+			if receipt == nil {
+				t.Fatal("missing partial receipt")
+			}
+			data, err := schemas.Marshal(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			input, output := "input_tokens", "output_tokens"
+			if mode == "chat" {
+				input, output = "prompt_tokens", "completion_tokens"
+			}
+			if fields[input] != float64(20) || fields[output] != nil || fields["total_tokens"] != nil {
+				t.Fatalf("partial measurements changed: %s", data)
+			}
+		})
+	}
+}
+
+// BenchmarkChatStreamUsagePresence measures receipt handling on a local streamed response.
+func BenchmarkChatStreamUsagePresence(b *testing.B) {
+	stop := "stop"
+	body := chatChunk("hello", nil) + chatChunk("", &stop) +
+		"data: {\"id\":\"chatcmpl-repro\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"repro-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\ndata: [DONE]\n\n"
+	// In-memory HTTP avoids exhausting ephemeral TCP ports when the streaming
+	// transport discards its completed connections between benchmark iterations.
+	provider := newStreamTestProvider("http://stream-benchmark.invalid")
+	var servers sync.WaitGroup
+	dial := func(_ string) (net.Conn, error) {
+		client, server := net.Pipe()
+		servers.Add(1)
+		go func() {
+			defer servers.Done()
+			defer server.Close()
+			_ = fasthttp.ServeConn(server, func(ctx *fasthttp.RequestCtx) {
+				ctx.SetContentType("text/event-stream")
+				ctx.SetBodyString(body)
+			})
+		}()
+		return client, nil
+	}
+	provider.client.Dial = dial
+	provider.streamingClient.Dial = dial
+	request := basicChatRequest()
+	key := testKey()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stream, err := provider.ChatCompletionStream(newStreamTestContext(), passthroughPostHook, nil, key, request)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for chunk := range stream {
+			if chunk.BifrostError != nil {
+				b.Fatalf("stream failed: %+v", chunk.BifrostError)
+			}
+		}
+	}
+	b.StopTimer()
+	provider.client.CloseIdleConnections()
+	provider.streamingClient.CloseIdleConnections()
+	servers.Wait()
 }

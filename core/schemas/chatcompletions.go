@@ -1945,11 +1945,14 @@ type ContentLogProb struct {
 
 // BifrostLLMUsage represents token usage information
 type BifrostLLMUsage struct {
+	tokenPresence           tokenUsagePresence
 	PromptTokens            int                          `json:"prompt_tokens,omitempty"`
 	PromptTokensDetails     *ChatPromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokens        int                          `json:"completion_tokens,omitempty"`
 	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 	TotalTokens             int                          `json:"total_tokens"`
+	// InputCharacters is a provider-observed character count, independent of tokens.
+	InputCharacters *int `json:"input_characters,omitempty"`
 	// AudioSeconds carries duration-based audio usage when a provider reports
 	// seconds instead of tokens.
 	AudioSeconds *float64 `json:"audio_seconds,omitempty"`
@@ -2100,6 +2103,12 @@ func MergeBifrostLLMUsage(base, add *BifrostLLMUsage) *BifrostLLMUsage {
 		PromptTokens:     base.PromptTokens + add.PromptTokens,
 		CompletionTokens: base.CompletionTokens + add.CompletionTokens,
 		TotalTokens:      base.TotalTokens + add.TotalTokens,
+	}
+
+	// A sum is complete only when both constituent requests observed that unit.
+	merged.tokenPresence = tokenUsageTracked | (base.tokenPresence.observed() & add.tokenPresence.observed() & (tokenUsageInput | tokenUsageOutput | tokenUsageTotal))
+	if base.InputCharacters != nil && add.InputCharacters != nil {
+		merged.InputCharacters = Ptr(*base.InputCharacters + *add.InputCharacters)
 	}
 
 	if base.PromptTokensDetails != nil || add.PromptTokensDetails != nil {
@@ -2498,6 +2507,7 @@ func (u *BifrostLLMUsage) DeepCopy() *BifrostLLMUsage {
 		return nil
 	}
 	c := *u
+	c.InputCharacters = copyIntPtr(u.InputCharacters)
 	if u.PromptTokensDetails != nil {
 		pd := *u.PromptTokensDetails
 		if u.PromptTokensDetails.CachedWriteTokenDetails != nil {

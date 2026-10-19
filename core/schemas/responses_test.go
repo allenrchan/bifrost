@@ -13,6 +13,45 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// TestResponsesDefaultsPreserveUsageDetailPresence keeps absent details distinct from explicit zero on both response paths.
+func TestResponsesDefaultsPreserveUsageDetailPresence(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, measured := range []bool{false, true} {
+			t.Run(fmt.Sprintf("stream=%t/measured=%t", stream, measured), func(t *testing.T) {
+				usage := &ResponsesResponseUsage{InputTokens: 20, OutputTokens: 4, TotalTokens: 24}
+				if measured {
+					usage.InputTokensDetails = &ResponsesResponseInputTokens{CachedReadTokens: 0}
+					usage.OutputTokensDetails = &ResponsesResponseOutputTokens{ReasoningTokens: 0}
+				}
+				response := &BifrostResponsesResponse{Usage: usage}
+				var got *BifrostResponsesResponse
+				if stream {
+					got = (&BifrostResponsesStreamResponse{Type: ResponsesStreamResponseTypeCompleted, Response: response}).WithDefaults().Response
+				} else {
+					got = response.WithDefaults()
+				}
+				if (got.Usage.InputTokensDetails != nil) != measured || (got.Usage.OutputTokensDetails != nil) != measured {
+					t.Fatalf("usage details presence changed: %+v", got.Usage)
+				}
+				if measured && (got.Usage.InputTokensDetails.CachedReadTokens != 0 || got.Usage.OutputTokensDetails.ReasoningTokens != 0) {
+					t.Fatal("explicit zero changed")
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkResponsesUsageDefaults measures defaulting without provider usage breakdowns.
+func BenchmarkResponsesUsageDefaults(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		response := (&BifrostResponsesResponse{Usage: &ResponsesResponseUsage{OutputTokens: 4}}).WithDefaults()
+		if response.Usage == nil {
+			b.Fatal("missing usage")
+		}
+	}
+}
+
 func TestAnthropicBillingHeaderExtraction(t *testing.T) {
 	header := "x-anthropic-billing-header: cc_version=2.1.270.42c; cc_entrypoint=cli; cch=12345;"
 	for _, tc := range []struct {

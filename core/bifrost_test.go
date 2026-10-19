@@ -58,6 +58,95 @@ func createBifrostError(message string, statusCode *int, errorType *string, isBi
 	}
 }
 
+type immediateStreamTracer struct {
+	schemas.NoOpTracer
+	parked schemas.SpanHandle
+	stores int
+	ended  int
+}
+
+func (tracer *immediateStreamTracer) StartSpanID(_ context.Context, _ string, kind schemas.SpanKind) (string, schemas.SpanHandle) {
+	if kind != schemas.SpanKindLLMCall {
+		return "", nil
+	}
+	return "immediate-span", "immediate-handle"
+}
+
+func (tracer *immediateStreamTracer) StoreDeferredSpan(_ string, handle schemas.SpanHandle) {
+	tracer.parked = handle
+	tracer.stores++
+}
+
+func (tracer *immediateStreamTracer) ClearDeferredSpan(_ string) { tracer.parked = nil }
+
+func (tracer *immediateStreamTracer) EndSpan(handle schemas.SpanHandle, _ schemas.SpanStatus, _ string) {
+	if handle != nil {
+		tracer.ended++
+	}
+}
+
+func TestExecuteRequestWithRetries_ImmediateStreamOwnsItsSpan(t *testing.T) {
+	for _, mode := range []string{"terminal-before-return", "startup-error", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+			tracer := &immediateStreamTracer{}
+			ctx.SetValue(schemas.BifrostContextKeyTracer, tracer)
+			ctx.SetValue(schemas.BifrostContextKeyTraceID, "immediate-trace")
+			handler := func(_ schemas.Key) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+				if tracer.parked == nil {
+					t.Error("provider can complete before its deferred span is registered")
+				}
+				if mode == "startup-error" {
+					return nil, createBifrostError("startup refused", Ptr(400), nil, true)
+				}
+				stream := make(chan *schemas.BifrostStreamChunk, 1)
+				if mode != "empty" {
+					stream <- &schemas.BifrostStreamChunk{BifrostChatResponse: &schemas.BifrostChatResponse{ID: "completed"}}
+					// A fast buffered provider can finish its terminal callback before
+					// returning the channel. Completion must not be parked a second time.
+					tracer.EndSpan(tracer.parked, schemas.SpanStatusOk, "")
+					tracer.ClearDeferredSpan("immediate-trace")
+				}
+				close(stream)
+				return stream, nil
+			}
+			stream, failure := executeRequestWithRetries(ctx, createTestConfig(0, 0, 0), handler, nil,
+				schemas.ChatCompletionStreamRequest, schemas.OpenAI, "proof-model", nil, NewDefaultLogger(schemas.LogLevelError))
+			if stream != nil {
+				for range stream {
+				}
+			}
+			if (failure != nil) != (mode == "startup-error") {
+				t.Fatalf("unexpected failure: %v", failure)
+			}
+			if tracer.parked != nil || tracer.stores != 1 || tracer.ended != 1 {
+				t.Errorf("stream span ownership: parked=%v stores=%d ended=%d", tracer.parked, tracer.stores, tracer.ended)
+			}
+		})
+	}
+}
+
+func BenchmarkExecuteRequestWithRetries_SpanRegistration(b *testing.B) {
+	for _, streaming := range []bool{false, true} {
+		b.Run(fmt.Sprintf("streaming=%t", streaming), func(b *testing.B) {
+			requestType := schemas.ChatCompletionRequest
+			if streaming {
+				requestType = schemas.ChatCompletionStreamRequest
+			}
+			logger := NewDefaultLogger(schemas.LogLevelError)
+			config := createTestConfig(0, 0, 0)
+			b.ReportAllocs()
+			for b.Loop() {
+				ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+				ctx.SetValue(schemas.BifrostContextKeyTracer, &schemas.NoOpTracer{})
+				ctx.SetValue(schemas.BifrostContextKeyTraceID, "benchmark-trace")
+				executeRequestWithRetries(ctx, config, func(schemas.Key) (string, *schemas.BifrostError) { return "ok", nil },
+					nil, requestType, schemas.OpenAI, "proof-model", nil, logger)
+			}
+		})
+	}
+}
+
 // Test executeRequestWithRetries - success scenarios
 func TestExecuteRequestWithRetries_SuccessScenarios(t *testing.T) {
 	config := createTestConfig(3, 100*time.Millisecond, 1*time.Second)
@@ -588,11 +677,11 @@ func TestCreateBaseProvider_CustomTypesafeBase(t *testing.T) {
 		t.Fatalf("expected custom provider key my-typesafe, got %q", provider.GetProviderKey())
 	}
 
-	_, err = bifrost.createBaseProvider("my-vertex", &schemas.ProviderConfig{
-		CustomProviderConfig: &schemas.CustomProviderConfig{BaseProviderType: schemas.Vertex},
+	_, err = bifrost.createBaseProvider("my-azure", &schemas.ProviderConfig{
+		CustomProviderConfig: &schemas.CustomProviderConfig{BaseProviderType: schemas.Azure},
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported base provider type") {
-		t.Fatalf("vertex is not a supported base provider, got err=%v", err)
+		t.Fatalf("azure is not a supported base provider, got err=%v", err)
 	}
 }
 
@@ -7753,6 +7842,85 @@ func BenchmarkShouldTryFallbacks(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				_ = bifrost.shouldTryFallbacks(nil, req, primaryErr)
+			}
+		})
+	}
+}
+
+func TestCreateBaseProvider_CustomVertexKeepsItsProfileIdentity(t *testing.T) {
+	client := &Bifrost{logger: NewDefaultLogger(schemas.LogLevelError)}
+	provider, err := client.createBaseProvider("custom-vertex-profile", &schemas.ProviderConfig{
+		CustomProviderConfig: &schemas.CustomProviderConfig{BaseProviderType: schemas.Vertex},
+	})
+	if err != nil {
+		t.Fatalf("Vertex custom profile refused: %v", err)
+	}
+	if provider.GetProviderKey() != "custom-vertex-profile" {
+		t.Fatalf("custom Vertex identity collapsed to %q", provider.GetProviderKey())
+	}
+	native, err := client.createBaseProvider(schemas.Vertex, &schemas.ProviderConfig{})
+	if err != nil || native.GetProviderKey() != schemas.Vertex {
+		t.Fatal("built-in Vertex identity changed")
+	}
+}
+
+type customOperationProbe struct {
+	schemas.Provider
+	calls int
+}
+
+func (p *customOperationProbe) GetProviderKey() schemas.ModelProvider { return "custom-vertex-profile" }
+func (p *customOperationProbe) Embedding(*schemas.BifrostContext, schemas.Key, *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
+	p.calls++
+	return nil, nil
+}
+func (p *customOperationProbe) SpeechStream(*schemas.BifrostContext, schemas.PostHookRunner, func(context.Context), schemas.Key, *schemas.BifrostSpeechRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+	p.calls++
+	c := make(chan *schemas.BifrostStreamChunk)
+	close(c)
+	return c, nil
+}
+
+func TestCustomProviderOperationAdmissionPrecedesBufferedAndStreamDispatch(t *testing.T) {
+	client := &Bifrost{}
+	config := &schemas.ProviderConfig{CustomProviderConfig: &schemas.CustomProviderConfig{CustomProviderKey: "custom-vertex-profile", BaseProviderType: schemas.Vertex, AllowedRequests: &schemas.AllowedRequests{}}}
+	for _, kind := range []schemas.RequestType{schemas.EmbeddingRequest, schemas.SpeechStreamRequest} {
+		probe := &customOperationProbe{}
+		message := &ChannelMessage{BifrostRequest: schemas.BifrostRequest{RequestType: kind, EmbeddingRequest: &schemas.BifrostEmbeddingRequest{Model: "proof-model"}, SpeechRequest: &schemas.BifrostSpeechRequest{Model: "proof-model"}}}
+		var err *schemas.BifrostError
+		if kind == schemas.EmbeddingRequest {
+			_, err = client.handleProviderRequest(probe, config, message, schemas.Key{}, nil)
+		} else {
+			_, err = client.handleProviderStreamRequest(probe, config, message, schemas.Key{}, nil, nil)
+		}
+		if err == nil || probe.calls != 0 {
+			t.Fatalf("%s reached a custom provider that denies that operation", kind)
+		}
+		if err.Error == nil || err.Error.Code == nil || *err.Error.Code != "unsupported_operation" || err.ExtraFields.Provider != "custom-vertex-profile" || err.ExtraFields.OriginalModelRequested != "proof-model" {
+			t.Fatalf("operation denial lost its selected identity: %#v", err)
+		}
+	}
+}
+
+func BenchmarkCustomProviderOperationAdmission(b *testing.B) {
+	client := &Bifrost{}
+	for _, test := range []struct {
+		name   string
+		config *schemas.CustomProviderConfig
+	}{
+		{"builtin", nil}, {"unrestricted", &schemas.CustomProviderConfig{BaseProviderType: schemas.Vertex}},
+		{"restricted", &schemas.CustomProviderConfig{BaseProviderType: schemas.Vertex, AllowedRequests: &schemas.AllowedRequests{Embedding: true}}},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			config := &schemas.ProviderConfig{CustomProviderConfig: test.config}
+			probe := &customOperationProbe{}
+			message := &ChannelMessage{BifrostRequest: schemas.BifrostRequest{RequestType: schemas.EmbeddingRequest, EmbeddingRequest: &schemas.BifrostEmbeddingRequest{Model: "proof-model"}}}
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := client.handleProviderRequest(probe, config, message, schemas.Key{}, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}

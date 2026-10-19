@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -227,6 +229,38 @@ func TestToBifrostEmbeddingResponsePreservesPrecision(t *testing.T) {
 }
 
 func TestToBifrostEmbeddingResponseUsage(t *testing.T) {
+	t.Run("usage survives an empty embedding batch", func(t *testing.T) {
+		var upstream gemini.GeminiEmbeddingResponse
+		require.NoError(t, json.Unmarshal([]byte(`{"embeddings":[],"usageMetadata":{"promptTokenCount":12,"totalTokenCount":12}}`), &upstream))
+
+		resp := gemini.ToBifrostEmbeddingResponse(&upstream, "gemini-embedding-001")
+
+		require.NotNil(t, resp)
+		assert.Empty(t, resp.Data, "usage must not fabricate a usable embedding")
+		assert.Equal(t, "gemini-embedding-001", resp.Model)
+		assert.Equal(t, "list", resp.Object)
+		require.NotNil(t, resp.Usage)
+		assert.Equal(t, 12, resp.Usage.PromptTokens)
+		assert.Equal(t, 12, resp.Usage.TotalTokens)
+	})
+
+	t.Run("an absent single embedding also retains measured usage", func(t *testing.T) {
+		resp := gemini.ToBifrostEmbeddingResponse(&gemini.GeminiEmbeddingResponse{
+			UsageMetadata: &gemini.GenerateContentResponseUsageMetadata{PromptTokenCount: 4, TotalTokenCount: 4},
+		}, "gemini-embedding-2-preview")
+
+		require.NotNil(t, resp)
+		assert.Empty(t, resp.Data)
+		require.NotNil(t, resp.Usage)
+		assert.Equal(t, 4, resp.Usage.PromptTokens)
+		assert.Equal(t, 4, resp.Usage.TotalTokens)
+	})
+
+	t.Run("empty responses without usable usage stay absent", func(t *testing.T) {
+		assert.Nil(t, gemini.ToBifrostEmbeddingResponse(nil, "gemini-embedding-001"))
+		assert.Nil(t, gemini.ToBifrostEmbeddingResponse(&gemini.GeminiEmbeddingResponse{}, "gemini-embedding-001"))
+	})
+
 	// Vertex :embedContent reports usage here and omits Statistics entirely.
 	t.Run("usageMetadata is surfaced", func(t *testing.T) {
 		resp := gemini.ToBifrostEmbeddingResponse(&gemini.GeminiEmbeddingResponse{
@@ -312,6 +346,25 @@ func TestToBifrostEmbeddingResponseUsage(t *testing.T) {
 
 		assert.Nil(t, resp.Usage)
 	})
+}
+
+func BenchmarkToBifrostEmbeddingResponse(b *testing.B) {
+	for _, tc := range []struct {
+		name     string
+		response *gemini.GeminiEmbeddingResponse
+	}{
+		{"single", &gemini.GeminiEmbeddingResponse{Embedding: &gemini.GeminiEmbedding{Values: []float64{0.1, 0.2}}, UsageMetadata: &gemini.GenerateContentResponseUsageMetadata{PromptTokenCount: 12, TotalTokenCount: 12}}},
+		{"batch", &gemini.GeminiEmbeddingResponse{Embeddings: []gemini.GeminiEmbedding{{Values: []float64{0.1, 0.2}}, {Values: []float64{0.3, 0.4}}}, UsageMetadata: &gemini.GenerateContentResponseUsageMetadata{PromptTokenCount: 12, TotalTokenCount: 12}}},
+		{"empty_with_usage", &gemini.GeminiEmbeddingResponse{UsageMetadata: &gemini.GenerateContentResponseUsageMetadata{PromptTokenCount: 12, TotalTokenCount: 12}}},
+		{"empty_without_usage", &gemini.GeminiEmbeddingResponse{}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = gemini.ToBifrostEmbeddingResponse(tc.response, "gemini-embedding-001")
+			}
+		})
+	}
 }
 
 // TestThoughtSignatureInToolCalls tests that thought signatures are properly embedded in tool call IDs
@@ -6121,4 +6174,35 @@ func TestGenAIPartMediaResolution_SurvivesBatchConversion(t *testing.T) {
 	got := batchReq.Contents[0].Parts[0].MediaResolution
 	require.NotNil(t, got, "batch conversion must preserve per-part media resolution")
 	assert.Equal(t, "MEDIA_RESOLUTION_ULTRA_HIGH", got.Level)
+}
+
+// Drive the real provider HTTP/decode path; the only substituted boundary is the external vendor.
+func TestEmbeddingCharacterHTTPReceipt(t *testing.T) {
+	for _, chars := range []int{0, 17} {
+		t.Run(fmt.Sprint(chars), func(t *testing.T) {
+			requests := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"embeddings":[{"values":[0.1,0.2]}],"metadata":{"billableCharacterCount":%d}}`, chars)
+			}))
+			defer upstream.Close()
+			config := &schemas.ProviderConfig{NetworkConfig: schemas.NetworkConfig{BaseURL: upstream.URL, DefaultRequestTimeoutInSeconds: 10}}
+			config.CheckAndSetDefaults()
+			provider := gemini.NewGeminiProvider(config, nil)
+			text := "fixture"
+			response, failure := provider.Embedding(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+				schemas.Key{Value: *schemas.NewSecretVar("test-key")},
+				&schemas.BifrostEmbeddingRequest{Provider: schemas.Gemini, Model: "gemini-embedding-001", Input: []schemas.EmbeddingInputItem{{Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeText, Text: &text}}}}})
+			require.Nil(t, failure)
+			require.NotNil(t, response)
+			require.Equal(t, "/models/gemini-embedding-001:batchEmbedContents", <-requests)
+			require.NotNil(t, response.Usage.InputCharacters)
+			require.Equal(t, chars, *response.Usage.InputCharacters)
+			input, output, total := response.Usage.TokenMeasurements()
+			require.Nil(t, input)
+			require.Nil(t, output)
+			require.Nil(t, total)
+		})
+	}
 }
