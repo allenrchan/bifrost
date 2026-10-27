@@ -13,6 +13,7 @@ import (
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 )
 
 // TestToOpenAIChatRequest_PreservesOutputTokenBound covers SDK and native Chat ingress,
@@ -621,9 +622,11 @@ func TestToOpenAIChatRequest_CustomProfileSampling(t *testing.T) {
 		effort     string
 		wantEffort string
 		stripped   bool
+		customFlag bool
 		record     *schemas.ModelCapabilities
 	}{
 		{name: "openai default reasoning", base: schemas.OpenAI, model: "gpt-5.5", stripped: true},
+		{name: "legacy custom marker remains supported", base: schemas.OpenAI, model: "gpt-5.5", stripped: true, customFlag: true},
 		{name: "openai high reasoning", base: schemas.OpenAI, model: "gpt-5.5", effort: "high", wantEffort: "high", stripped: true},
 		{name: "azure default reasoning", base: schemas.Azure, model: "gpt-5.5", stripped: true},
 		{name: "azure high reasoning", base: schemas.Azure, model: "gpt-5.5", effort: "high", wantEffort: "high", stripped: true},
@@ -670,7 +673,7 @@ func TestToOpenAIChatRequest_CustomProfileSampling(t *testing.T) {
 					Content: &schemas.ChatMessageContent{ContentStr: schemas.Ptr("hello")}}},
 			}
 			ctx := schemas.NewBifrostContext(nil, schemas.NoDeadline)
-			ctx.SetValue(schemas.BifrostContextKeyIsCustomProvider, true)
+			ctx.SetValue(schemas.BifrostContextKeyIsCustomProvider, tt.customFlag)
 			ctx.SetValue(schemas.BifrostContextKeyBaseProviderType, tt.base)
 			out := ToOpenAIChatRequest(ctx, request)
 			require.NotNil(t, out)
@@ -708,6 +711,55 @@ func TestToOpenAIChatRequest_CustomProfileSampling(t *testing.T) {
 	}
 }
 
+// The worker marks an alias of a standard OpenAI base as non-custom. Exercise
+// that real context through serialization and an owned provider HTTP boundary.
+func TestHandleOpenAIChatCompletionRequest_CustomProfileSampling(t *testing.T) {
+	captured := make(chan json.RawMessage, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(`{"id":"profile-proof","object":"chat.completion","model":"gpt-5.5","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)); err != nil {
+			t.Errorf("write controlled response: %v", err)
+		}
+	}))
+	defer server.Close()
+	const profile schemas.ModelProvider = "opaque-profile"
+	ctx := schemas.NewBifrostContext(nil, schemas.NoDeadline)
+	ctx.SetValue(schemas.BifrostContextKeyIsCustomProvider, false)
+	ctx.SetValue(schemas.BifrostContextKeyBaseProviderType, schemas.OpenAI)
+	request := &schemas.BifrostChatRequest{
+		Provider: profile, Model: "gpt-5.5",
+		Input: []schemas.ChatMessage{{Role: schemas.ChatMessageRoleUser,
+			Content: &schemas.ChatMessageContent{ContentStr: schemas.Ptr("hello")}}},
+		Params: &schemas.ChatParameters{Temperature: schemas.Ptr(0.2), TopP: schemas.Ptr(0.8),
+			MaxCompletionTokens: schemas.Ptr(64),
+			Reasoning:           &schemas.ChatReasoning{Effort: schemas.Ptr("high")}},
+	}
+	response, failure := HandleOpenAIChatCompletionRequest(ctx, &fasthttp.Client{}, server.URL,
+		request, nil, nil, false, false, profile, nil, nil, nil, passthroughTestLogger{})
+	require.Nil(t, failure)
+	require.NotNil(t, response)
+	var body json.RawMessage
+	select {
+	case body = <-captured:
+	default:
+		t.Fatal("provider request was not captured")
+	}
+	require.False(t, providerUtils.GetJSONField(body, "temperature").Exists(), "wire: %s", body)
+	require.False(t, providerUtils.GetJSONField(body, "top_p").Exists(), "wire: %s", body)
+	require.Equal(t, "gpt-5.5", gjsonString(body, "model"))
+	require.Equal(t, "high", gjsonString(body, "reasoning_effort"))
+	require.Equal(t, int64(64), providerUtils.GetJSONField(body, "max_completion_tokens").Int())
+	require.Equal(t, profile, request.Provider)
+	require.Equal(t, 0.2, *request.Params.Temperature)
+	require.Equal(t, 0.8, *request.Params.TopP)
+}
+
 // BenchmarkToOpenAIChatRequest_CustomProfileSampling compares native and custom
 // host conversion with no retained state or network work in the measured loop.
 func BenchmarkToOpenAIChatRequest_CustomProfileSampling(b *testing.B) {
@@ -730,7 +782,7 @@ func BenchmarkToOpenAIChatRequest_CustomProfileSampling(b *testing.B) {
 			provider := tc.provider
 			if tc.base != "" {
 				provider = schemas.ModelProvider("benchmark-profile")
-				ctx.SetValue(schemas.BifrostContextKeyIsCustomProvider, true)
+				ctx.SetValue(schemas.BifrostContextKeyIsCustomProvider, false)
 				ctx.SetValue(schemas.BifrostContextKeyBaseProviderType, tc.base)
 			}
 			params := &schemas.ChatParameters{

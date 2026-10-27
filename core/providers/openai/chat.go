@@ -202,19 +202,20 @@ func ToOpenAIChatRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.Bifros
 		openaiReq.ChatParameters.Prediction = prediction
 		return openaiReq
 	default:
+		// The worker marks aliases of standard hosts as non-custom. Resolve
+		// host compatibility by the configured base without changing routing.
+		if baseProvider == schemas.OpenAI || baseProvider == schemas.Azure {
+			baseCaps := schemas.ResolveModelCaps(baseProvider, capModel)
+			openaiReq.normalizeReasoningEffort(baseCaps)
+			openaiReq.stripUnsupportedSamplingParams(baseCaps)
+			return openaiReq
+		}
 		// Check if provider is a custom provider
 		if isCustomProvider, ok := ctx.Value(schemas.BifrostContextKeyIsCustomProvider).(bool); ok && isCustomProvider {
 			// A custom provider reports its own name, so a DeepSeek-based one lands here
 			// and still needs the json_schema downgrade DeepSeek's endpoint requires.
 			if baseProvider == schemas.DeepSeek {
 				openaiReq.downgradeJSONSchemaToJSONObject()
-			}
-			// Custom routes retain their identity while using their configured
-			// OpenAI host's existing reasoning and sampling compatibility.
-			if baseProvider == schemas.OpenAI || baseProvider == schemas.Azure {
-				baseCaps := schemas.ResolveModelCaps(baseProvider, capModel)
-				openaiReq.normalizeReasoningEffort(baseCaps)
-				openaiReq.stripUnsupportedSamplingParams(baseCaps)
 			}
 			return openaiReq
 		}
