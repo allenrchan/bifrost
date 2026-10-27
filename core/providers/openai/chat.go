@@ -109,7 +109,8 @@ func ToOpenAIChatRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.Bifros
 	// sent down the strip-only default.
 	// The request stays in the provider's default mode: see
 	// responsesIsOpenAIFamilyBreakpointTarget for why Bifrost never sets explicit mode.
-	if chatUsesPromptCacheBreakpoints(caps, schemas.ResolveBaseProvider(ctx, bifrostReq.Provider), capModel) {
+	baseProvider := schemas.ResolveBaseProvider(ctx, bifrostReq.Provider)
+	if chatUsesPromptCacheBreakpoints(caps, baseProvider, capModel) {
 		ceiling := promptCacheBreakpointCeiling(ctx, true, openaiReq.ChatParameters.PromptCacheOptions, openaiReq.ExtraParams)
 		openaiReq.Messages = applyChatCacheBreakpoints(openaiReq.Messages, ceiling)
 	}
@@ -205,8 +206,15 @@ func ToOpenAIChatRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.Bifros
 		if isCustomProvider, ok := ctx.Value(schemas.BifrostContextKeyIsCustomProvider).(bool); ok && isCustomProvider {
 			// A custom provider reports its own name, so a DeepSeek-based one lands here
 			// and still needs the json_schema downgrade DeepSeek's endpoint requires.
-			if schemas.ResolveBaseProvider(ctx, bifrostReq.Provider) == schemas.DeepSeek {
+			if baseProvider == schemas.DeepSeek {
 				openaiReq.downgradeJSONSchemaToJSONObject()
+			}
+			// Custom routes retain their identity while using their configured
+			// OpenAI host's existing reasoning and sampling compatibility.
+			if baseProvider == schemas.OpenAI || baseProvider == schemas.Azure {
+				baseCaps := schemas.ResolveModelCaps(baseProvider, capModel)
+				openaiReq.normalizeReasoningEffort(baseCaps)
+				openaiReq.stripUnsupportedSamplingParams(baseCaps)
 			}
 			return openaiReq
 		}

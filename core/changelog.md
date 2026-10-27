@@ -1,3 +1,4 @@
+[fix]: apply host sampling rules to custom OpenAI profiles [@allenrchan](https://github.com/allenrchan)
 - feat: agent gateway runtime with A2A request, event and trace contracts, card discovery, A2A plugin pipeline, streaming, durable push delivery and opt-in private push callbacks; `schemas.Tracer` gains `ReleaseTrace`
 - feat: gpt live session schemas, live provider interface and openai implementation, with sideband attach routes, the `live_sideband` request type and delegation error recording
 - feat: add cloudflare workers ai provider with chat, responses, embeddings, model listing and native clef decisions
